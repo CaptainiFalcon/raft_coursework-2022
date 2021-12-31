@@ -14,7 +14,7 @@ import "time"
 import "math/rand"
 import "sync/atomic"
 import "sync"
-import "strconv"
+// import "strconv"
 
 // The tester generously allows solutions to complete elections in one second
 // (much more than the paper's range of timeouts).
@@ -333,7 +333,7 @@ func TestBackup(t *testing.T) {
 
 	// put leader and one follower in a partition
 	leader1 := cfg.checkOneLeader()
-	fmt.Printf("\ngroup   " + strconv.Itoa((leader1 + 2) % servers))
+	// fmt.Printf("\ngroup   " + strconv.Itoa((leader1 + 2) % servers))
 	cfg.disconnect((leader1 + 2) % servers)
 	cfg.disconnect((leader1 + 3) % servers)
 	cfg.disconnect((leader1 + 4) % servers)

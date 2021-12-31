@@ -116,6 +116,7 @@ func (rf *Raft) persist() {
 	e := gob.NewEncoder(w)
 	e.Encode(rf.currentTerm)
 	e.Encode(rf.votedFor)
+	e.Encode(rf.logs)
 	data := w.Bytes()
 	rf.persister.SaveRaftState(data)
 }
@@ -135,6 +136,7 @@ func (rf *Raft) readPersist(data []byte) {
 		d := gob.NewDecoder(r)
 		d.Decode(&rf.currentTerm)
 		d.Decode(&rf.votedFor)
+		d.Decode(&rf.logs)
 	}
 }
 
@@ -276,20 +278,13 @@ func (rf *Raft) AppendEntries(args AppendEntryArgs, reply *AppendEntryReply) {
 			reply.Success = false
 			reply.EntriesCount = 0
 		} else if args.Entries == nil { // the leader inform me that he is leader
-			if args.PrevLogIndex < -1 {
-				fmt.Printf("\nargs.PrevLogIndex ==  " + strconv.Itoa(args.PrevLogIndex))
-			}
-			if args.PrevLogIndex + 1 >= 0 {
-				rf.logs = rf.logs[ : args.PrevLogIndex + 1]
-			}
+			// if args.PrevLogIndex + 1 >= 0 {
+			rf.logs = rf.logs[ : args.PrevLogIndex + 1]
+			// }
 			reply.Success = true
 			reply.EntriesCount = 0
 		} else {
-			if args.PrevLogIndex == -1 {
-				// fmt.Printf("\nargs.PrevLogIndex == -1 " + strconv.Itoa(rf.me))
-			}
 			rf.logs = rf.logs[ : args.PrevLogIndex + 1]
-			// fmt.Printf("\n" + strconv.Itoa(len(rf.logs)) + "      " + strconv.Itoa(rf.me))
 			rf.logs = append(rf.logs, args.Entries...)
 			reply.Success = true
 			reply.EntriesCount = len(args.Entries)
@@ -299,7 +294,7 @@ func (rf *Raft) AppendEntries(args AppendEntryArgs, reply *AppendEntryReply) {
 			// fmt.Printf("\nsuccess to append to 2   " + strconv.Itoa(len(args.Entries)))
 		// }
 		// if args.LeaderCommit > rf.commitIndex {  // why stupiy
-		if reply.Success == true && args.LeaderCommit > rf.commitIndex {
+		if reply.Success == true && args.LeaderCommit >= rf.commitIndex {
 			rf.commitIndex = int_min(args.LeaderCommit, len(rf.logs) - 1)
 			go rf.Commit()
 		}
@@ -359,7 +354,7 @@ func (rf *Raft) AfterSendAppendEntries(peer int, reply AppendEntryReply) {
 
 	if reply.Success == true {
 		rf.nextIndex[peer] += reply.EntriesCount
-		rf.matchIndex[peer] = rf.nextIndex[peer] - 1
+		rf.matchIndex[peer] = int_max(rf.nextIndex[peer] - 1, rf.matchIndex[peer])
 		/* If there exists an N such that N > commitIndex, a majority
 			of matchIndex[i] ≥ N, and log[N].term == currentTerm:
 			set commitIndex = N (§5.3, §5.4).
@@ -374,6 +369,7 @@ func (rf *Raft) AfterSendAppendEntries(peer int, reply AppendEntryReply) {
 			}
 		}
 		if cnt > len(rf.peers) / 2 {
+			// if rf.commitIndex < N && rf.logs[N].Term == rf.currentTerm {  // that's wrong
 			if rf.commitIndex < N && N < len(rf.logs) && rf.logs[N].Term == rf.currentTerm {
 				rf.commitIndex = N
 				go rf.Commit()
@@ -394,10 +390,10 @@ func (rf *Raft) Commit() {
 
 	for i := rf.lastApplied + 1; i <= rf.commitIndex; i++ {
 		var args ApplyMsg
-		if debug {
-			// fmt.Printf("\ncommit   " + strconv.Itoa(i) + "      " + strconv.Itoa(rf.me))
-		}
 		args.Index = i + 1
+		if i == len(rf.logs) {
+			fmt.Printf("\nwhat the fuck " + strconv.Itoa(rf.commitIndex))
+		}
 		args.Command = rf.logs[i].Command
 		rf.applyCh <- args
 	}
