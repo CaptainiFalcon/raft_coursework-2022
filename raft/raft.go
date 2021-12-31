@@ -71,8 +71,8 @@ type Raft struct {
 
 	// Volatile data
 	state		int		// 0 leader  1 candidate  2 follower
-	votesCount	int		// how many votes I got
-	timer		*time.Timer
+	votesCount	int		// how many votes I got in a election
+	timer		*time.Timer		// for sending heartbeat or starting a election when followers does not receive a heartbeat or appendenties from leader
 }
 
 // return currentTerm and whether this server
@@ -159,8 +159,8 @@ type AppendEntryArgs struct {
 	// Rpc-related structure fields should start with an uppercase letter because of the syntax of the Go language
 	Term			int			// leader’s term
 	LeaderId		int
-	PrevLogIndex	int			// index of log entry immediately preceding	new ones
-	PrevLogTerm		int			// term of prevLogIndex entry
+	// PrevLogIndex	int			// index of log entry immediately preceding	new ones
+	// PrevLogTerm		int			// term of prevLogIndex entry
 	// Entries 		[]LogEntry	// log entries to store (empty for heartbeat; may send more than one for efficiency)
 	// LeaderCommit	int			// leader’s commitIndex
 }
@@ -182,8 +182,9 @@ func int_max(a int, b int)(int) {
 func (rf *Raft) TimeOut() {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	// if it is not leader, it means to start a election
-	if rf.state != LEADER {
+	if rf.state == LEADER { // if it is leader now, just to send a heartbeat
+		rf.SendAppendEntriesToAll()
+	} else {			// if it is not leader, it means to start a election
 		rf.state = CANDIDATE
 		rf.votedFor = rf.me
 		rf.currentTerm += 1
@@ -201,27 +202,25 @@ func (rf *Raft) TimeOut() {
 			if peer == rf.me {
 				continue
 			}
-			go func(peer int, args RequestVoteArgs) {
-				var reply RequestVoteReply
+			go func(peer int, args RequestVoteArgs) {   // RPC, ask others to give me their vote
+				var reply RequestVoteReply				// store the result of RPC
 				ret := rf.peers[peer].Call("Raft.RequestVote", args, &reply)
-				if ret {
+				if ret {	// if the remote procudure call successful, then go to analyse the result
 					rf.getVoteResult(reply)
 				}
 			}(peer, args)
 		}
-	} else { // if it is leader, just to send a heartbeat
-		rf.SendAppendEntriesToAll()
 	}
 	// leader and follower both need to reset tiemr
-	rf.resetTimer()
+	rf.ResetTimer()
 }
 
 // when follower receive a "AppendEnties", he reset his timer for starting a election
 // leader reset his timer for heartbeat
-func (rf *Raft) resetTimer() {
-	CSMA_time := time.Duration(ElectionMinTime + rand.Int63n(ElectionMaxTime - ElectionMinTime)) * time.Millisecond
-	if rf.state == LEADER {
-		CSMA_time = time.Duration(HeartbeatTime) * time.Millisecond
+func (rf *Raft) ResetTimer() {
+	CSMA_time := time.Duration(HeartbeatTime) * time.Millisecond   // it is similar with wireless communication
+	if rf.state != LEADER {
+		CSMA_time = time.Duration(ElectionMinTime + rand.Int63n(ElectionMaxTime - ElectionMinTime)) * time.Millisecond
 	}
 	if rf.timer == nil {
 		rf.timer = time.NewTimer(CSMA_time)
@@ -251,14 +250,14 @@ func (rf *Raft) AppendEntries(args AppendEntryArgs, reply *AppendEntryReply) {
 		rf.votedFor = -1
 		reply.Term = args.Term
 		
-		if args.PrevLogIndex >= 0 && len(rf.logs) - 1 < args.PrevLogIndex || args.PrevLogTerm != rf.logs[args.PrevLogIndex].Term {
-			reply.Success = false
-		} else {
+		// if args.PrevLogIndex >= 0 && len(rf.logs) - 1 < args.PrevLogIndex || args.PrevLogTerm != rf.logs[args.PrevLogIndex].Term {
+			// reply.Success = false
+		// } else {
 			reply.Success = true
-		}
+		// }
 		rf.persist()
 	}
-	rf.resetTimer()
+	rf.ResetTimer()
 }
 
 // call by leader to inform followers that leader is alive
@@ -293,7 +292,8 @@ func (rf *Raft) AfterSendAppendEntriesToAll(peer int, reply AppendEntryReply) {
 		rf.currentTerm = reply.Term    // if one server’s current term is smaller than the other’s, then it updates its current term to the larger value.
 		rf.votedFor = -1
 		rf.state = FOLLOWER
-		rf.resetTimer()
+		rf.persist()
+		rf.ResetTimer()
 		return
 	}
 
@@ -323,15 +323,14 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 	if args.Term < rf.currentTerm {
 		reply.Term = rf.currentTerm
 		reply.VoteGranted = false
-		return
 	} else if args.Term == rf.currentTerm {
 		// If votedFor is null or candidateId, and candidate’s log is at least as up-to-date as receiver’s log, grant vote
-		if rf.votedFor == -1 && candidate_log_MUTD {
+		if (rf.votedFor == -1 || rf.votedFor == args.CandidateId) && candidate_log_MUTD {
 			rf.votedFor = args.CandidateId		// is persistent data
 			rf.persist()
+			reply.Term = args.Term
+			reply.VoteGranted = true
 		}
-		reply.Term = args.Term
-		reply.VoteGranted = (rf.votedFor == args.CandidateId)
 	} else {
 		rf.currentTerm = args.Term  // if one server’s current term is smaller than the other’s, then it updates its current term to the larger value.
 		rf.state = FOLLOWER			// If a candidate or leader discovers that its term is out of date, it immediately reverts to follower state.
@@ -341,7 +340,7 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 			rf.votedFor = -1		// meet a larger Term but it's log is too old, so now vote for none
 		}
 		rf.persist()
-		rf.resetTimer()			// because of changing state
+		rf.ResetTimer()			// because of changing state
 		reply.Term = args.Term
 		reply.VoteGranted = (rf.votedFor == args.CandidateId)
 	}
@@ -351,7 +350,7 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 func (rf *Raft) getVoteResult(reply RequestVoteReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-
+	// his Term must as same as my Term, otherwise it's an old and unvalid vote
 	if reply.Term < rf.currentTerm { //when peer broken and reboot later, this situation maybe heppen
 		return
 	}
@@ -359,21 +358,23 @@ func (rf *Raft) getVoteResult(reply RequestVoteReply) {
 		rf.currentTerm = reply.Term		// if one server’s current term is smaller than the other’s, then it updates its current term to the larger value.
 		rf.state = FOLLOWER
 		rf.votedFor = -1
-		rf.resetTimer()
+		rf.persist()
+		rf.ResetTimer()
 		return
 	}
 
-	// when everything is normal, and I win the vote of that follower, the follow code should be executed
+	// when everything is ok, and I win the vote of that follower, the follow code should be executed
 	if rf.state == CANDIDATE && reply.VoteGranted == true {
 		rf.votesCount += 1
-		if rf.votesCount > len(rf.peers)/2 {
+		if rf.votesCount > len(rf.peers) / 2 {
 			rf.state = LEADER
-			for peer := 0; peer < len(rf.peers); peer++ { 
-				if peer == rf.me {
-					continue
-				}
-			}
-			rf.resetTimer()
+			// for peer := 0; peer < len(rf.peers); peer++ { 
+				// if peer == rf.me {
+					// continue
+				// }
+			// }
+			rf.SendAppendEntriesToAll()		// inform others immediately
+			rf.ResetTimer()					// and reset timer for next heartbeat
 		}
 	}
 	return
@@ -456,7 +457,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.votedFor = -1
 	rf.logs = make([]LogEntry, 0)
 	rf.state = FOLLOWER
-	rf.resetTimer()
+	rf.ResetTimer()			// for initing the first election
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
