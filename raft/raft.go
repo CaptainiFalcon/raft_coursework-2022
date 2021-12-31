@@ -43,7 +43,7 @@ const (
 	FOLLOWER = 2
 
 	HeartbeatTime = 100
-	ElectionMinTime = 200
+	ElectionMinTime = 150
 	ElectionMaxTime = 300
 )
 
@@ -272,8 +272,9 @@ func (rf *Raft) AppendEntries(args AppendEntryArgs, reply *AppendEntryReply) {
 		
 		if args.PrevLogIndex >= 0 && (len(rf.logs) - 1 < args.PrevLogIndex || args.PrevLogTerm != rf.logs[args.PrevLogIndex].Term) {
 			reply.Success = false
+			reply.EntriesCount = 0
 		} else if args.Entries == nil { // the leader inform me that he is leader
-			rf.logs = rf.logs[ : args.PrevLogIndex + 1]
+			// rf.logs = rf.logs[ : args.PrevLogIndex + 1]
 			reply.Success = true
 			reply.EntriesCount = 0
 		} else {
@@ -283,7 +284,8 @@ func (rf *Raft) AppendEntries(args AppendEntryArgs, reply *AppendEntryReply) {
 			reply.EntriesCount = len(args.Entries)
 		}
 		rf.persist()
-		if args.LeaderCommit > rf.commitIndex {
+		// if args.LeaderCommit > rf.commitIndex {  // why stupiy
+		if reply.Success == true && args.LeaderCommit > rf.commitIndex {
 			rf.commitIndex = int_min(args.LeaderCommit, len(rf.logs) - 1)
 			go rf.Commit()
 		}
@@ -341,6 +343,11 @@ func (rf *Raft) AfterSendAppendEntries(peer int, reply AppendEntryReply) {
 	if reply.Success == true {
 		rf.nextIndex[peer] += reply.EntriesCount
 		rf.matchIndex[peer] = rf.nextIndex[peer] - 1
+		/* If there exists an N such that N > commitIndex, a majority
+			of matchIndex[i] ≥ N, and log[N].term == currentTerm:
+			set commitIndex = N (§5.3, §5.4).
+			here, rf.matchIndex[peer] is the N
+		*/
 		cnt := 1
 		for peer_1 := 0; peer_1 < len(rf.peers); peer_1++ {
 			if peer_1 != rf.me && rf.matchIndex[peer_1] >= rf.matchIndex[peer] { 
@@ -349,8 +356,7 @@ func (rf *Raft) AfterSendAppendEntries(peer int, reply AppendEntryReply) {
 			}
 		}
 		if cnt > len(rf.peers) / 2 {
-			if rf.commitIndex < rf.matchIndex[peer] &&
-			    rf.logs[rf.matchIndex[peer]].Term == rf.currentTerm {
+			if rf.commitIndex < rf.matchIndex[peer] && rf.logs[rf.matchIndex[peer]].Term == rf.currentTerm {
 				rf.commitIndex = rf.matchIndex[peer]
 				go rf.Commit()
 			}
@@ -422,7 +428,7 @@ func (rf *Raft) getVoteResult(reply RequestVoteReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	// his Term must as same as my Term, otherwise it's an old and unvalid vote
-	if reply.Term < rf.currentTerm { //when peer broken and reboot later, this situation maybe heppen
+	if reply.Term < rf.currentTerm { //when peer broken and reboot later or slow network, this situation maybe heppen
 		return
 	}
 	if reply.Term > rf.currentTerm {
@@ -441,7 +447,7 @@ func (rf *Raft) getVoteResult(reply RequestVoteReply) {
 			rf.state = LEADER
 			for peer := 0; peer < len(rf.peers); peer++ { 
 				rf.nextIndex[peer] = len(rf.logs) 	// initialized to leader last log index + 1
-				rf.matchIndex[peer] = -1 		  	// how many entries that sever has already
+				rf.matchIndex[peer] = -1 		  	// how many corrent entries that sever has already
 			}
 			rf.SendAppendEntriesToAll()		// inform others immediately
 			rf.ResetTimer()					// and reset timer for next heartbeat
@@ -540,7 +546,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.currentTerm = 0
 	rf.votedFor = -1
 	rf.logs = make([]LogEntry, 0)
-	rf.persist()
+	// rf.persist()		// how folish is you, not means you my dear teacher, I means me
 	rf.state = FOLLOWER
 	
 	rf.applyCh = applyCh
@@ -549,9 +555,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.nextIndex = make([]int, len(peers))		// automatically initialize to be 0
 	rf.matchIndex = make([]int, len(peers))  
 	rf.ResetTimer()			// for initing the first election
+	
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
-
-
 	return rf
 }
