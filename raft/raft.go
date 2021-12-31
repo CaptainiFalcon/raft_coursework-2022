@@ -24,8 +24,10 @@ import "bytes"
 import "encoding/gob"
 import "time"
 import "math/rand"
+import "fmt"
+import "strconv"
 
-
+var debug bool = true
 //
 // as each Raft peer becomes aware that successive log entries are
 // committed, the peer should send an ApplyMsg to the service (or
@@ -274,16 +276,28 @@ func (rf *Raft) AppendEntries(args AppendEntryArgs, reply *AppendEntryReply) {
 			reply.Success = false
 			reply.EntriesCount = 0
 		} else if args.Entries == nil { // the leader inform me that he is leader
-			// rf.logs = rf.logs[ : args.PrevLogIndex + 1]
+			if args.PrevLogIndex < -1 {
+				fmt.Printf("\nargs.PrevLogIndex ==  " + strconv.Itoa(args.PrevLogIndex))
+			}
+			if args.PrevLogIndex + 1 >= 0 {
+				rf.logs = rf.logs[ : args.PrevLogIndex + 1]
+			}
 			reply.Success = true
 			reply.EntriesCount = 0
 		} else {
+			if args.PrevLogIndex == -1 {
+				// fmt.Printf("\nargs.PrevLogIndex == -1 " + strconv.Itoa(rf.me))
+			}
 			rf.logs = rf.logs[ : args.PrevLogIndex + 1]
+			// fmt.Printf("\n" + strconv.Itoa(len(rf.logs)) + "      " + strconv.Itoa(rf.me))
 			rf.logs = append(rf.logs, args.Entries...)
 			reply.Success = true
 			reply.EntriesCount = len(args.Entries)
 		}
 		rf.persist()
+		// if rf.me == 2 && reply.Success == true {
+			// fmt.Printf("\nsuccess to append to 2   " + strconv.Itoa(len(args.Entries)))
+		// }
 		// if args.LeaderCommit > rf.commitIndex {  // why stupiy
 		if reply.Success == true && args.LeaderCommit > rf.commitIndex {
 			rf.commitIndex = int_min(args.LeaderCommit, len(rf.logs) - 1)
@@ -306,13 +320,16 @@ func (rf *Raft) SendAppendEntriesToAll() {
 		args.LeaderId = rf.me
 
 		args.PrevLogIndex = rf.nextIndex[peer] - 1
-		if args.PrevLogIndex >= 0 {
+		if args.PrevLogIndex >= 0 && args.PrevLogIndex < len(rf.logs) {
 			args.PrevLogTerm = rf.logs[args.PrevLogIndex].Term
 		}
-		if rf.nextIndex[peer] < len(rf.logs) {
+		if rf.nextIndex[peer] >= 0 && rf.nextIndex[peer] < len(rf.logs) {
 			args.Entries = rf.logs[rf.nextIndex[peer] : ]
 		}
 		args.LeaderCommit = rf.commitIndex
+		if peer == 1 && debug {
+			// fmt.Printf("\nSendAppend     " + strconv.Itoa(len(args.Entries)) + "      " + strconv.Itoa(rf.me))
+		}
 		go func(peer int, args AppendEntryArgs) {
 			var reply AppendEntryReply
 			ret := rf.peers[peer].Call("Raft.AppendEntries", args, &reply)
@@ -348,22 +365,24 @@ func (rf *Raft) AfterSendAppendEntries(peer int, reply AppendEntryReply) {
 			set commitIndex = N (§5.3, §5.4).
 			here, rf.matchIndex[peer] is the N
 		*/
+		N := rf.matchIndex[peer]
 		cnt := 1
 		for peer_1 := 0; peer_1 < len(rf.peers); peer_1++ {
-			if peer_1 != rf.me && rf.matchIndex[peer_1] >= rf.matchIndex[peer] { 
+			if peer_1 != rf.me && rf.matchIndex[peer_1] >= N { 
 				// matchIndex is exist for leader to see a index whether already copy to other sever surpass majority 
 				cnt += 1
 			}
 		}
 		if cnt > len(rf.peers) / 2 {
-			if rf.commitIndex < rf.matchIndex[peer] && rf.logs[rf.matchIndex[peer]].Term == rf.currentTerm {
-				rf.commitIndex = rf.matchIndex[peer]
+			if rf.commitIndex < N && N < len(rf.logs) && rf.logs[N].Term == rf.currentTerm {
+				rf.commitIndex = N
 				go rf.Commit()
 			}
 		}
 
 	} else { //I'm leader
 		rf.nextIndex[peer] -= 1
+		rf.nextIndex[peer] = int_max(0, rf.nextIndex[peer])
 		rf.SendAppendEntriesToAll()
 	}
 
@@ -375,6 +394,9 @@ func (rf *Raft) Commit() {
 
 	for i := rf.lastApplied + 1; i <= rf.commitIndex; i++ {
 		var args ApplyMsg
+		if debug {
+			// fmt.Printf("\ncommit   " + strconv.Itoa(i) + "      " + strconv.Itoa(rf.me))
+		}
 		args.Index = i + 1
 		args.Command = rf.logs[i].Command
 		rf.applyCh <- args
@@ -447,7 +469,7 @@ func (rf *Raft) getVoteResult(reply RequestVoteReply) {
 			rf.state = LEADER
 			for peer := 0; peer < len(rf.peers); peer++ { 
 				rf.nextIndex[peer] = len(rf.logs) 	// initialized to leader last log index + 1
-				rf.matchIndex[peer] = -1 		  	// how many corrent entries that sever has already
+				// rf.matchIndex[peer] = -1 		  	// how many corrent entries that sever has already， (initialized to 0, increases monotonically)
 			}
 			rf.SendAppendEntriesToAll()		// inform others immediately
 			rf.ResetTimer()					// and reset timer for next heartbeat
