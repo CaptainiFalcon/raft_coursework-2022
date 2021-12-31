@@ -73,6 +73,15 @@ type Raft struct {
 	state		int		// 0 leader  1 candidate  2 follower
 	votesCount	int		// how many votes I got in a election
 	timer		*time.Timer		// for sending heartbeat or starting a election when followers does not receive a heartbeat or appendenties from leader
+	applyCh		chan ApplyMsg
+
+	commitIndex	int		// index of highest log entry known to be committed (initialized to 0, increases monotonically)
+	lastApplied	int		// index of highest log entry applied to state machine (initialized to 0, increases	monotonically)
+
+	// the follow data are use by leader only, and need to reinitialize after election
+	nextIndex	[]int	// for each server, index of the next log entry	to send to that server (initialized to leader last log index + 1)
+	matchIndex	[]int	// for each server, index of highest log entry known to be replicated on server	(initialized to 0, increases monotonically)
+						// matchIndex is exist for leader to see a index whether already copy to other sever surpass majority 
 }
 
 // return currentTerm and whether this server
@@ -159,15 +168,16 @@ type AppendEntryArgs struct {
 	// Rpc-related structure fields should start with an uppercase letter because of the syntax of the Go language
 	Term			int			// leader’s term
 	LeaderId		int
-	// PrevLogIndex	int			// index of log entry immediately preceding	new ones
-	// PrevLogTerm		int			// term of prevLogIndex entry
-	// Entries 		[]LogEntry	// log entries to store (empty for heartbeat; may send more than one for efficiency)
-	// LeaderCommit	int			// leader’s commitIndex
+	PrevLogIndex	int			// index of log entry immediately preceding	new ones
+	PrevLogTerm		int			// term of prevLogIndex entry
+	Entries 		[]LogEntry	// log entries to store (empty for heartbeat; may send more than one for efficiency)
+	LeaderCommit	int			// leader’s commitIndex
 }
 
 type AppendEntryReply struct {
 	Term 			int
 	Success 		bool
+	EntriesCount	int			// how many entries leader sent to me
 }
 
 //
@@ -179,6 +189,14 @@ func int_max(a int, b int)(int) {
 	}
 	return b
 }
+
+func int_min(a int, b int)(int) {
+	if a < b {
+		return a
+	}
+	return b
+}
+
 func (rf *Raft) TimeOut() {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
@@ -240,9 +258,11 @@ func (rf *Raft) AppendEntries(args AppendEntryArgs, reply *AppendEntryReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	if args.Term < rf.currentTerm {
+	if args.Term < rf.currentTerm {		// he is not a leader anymore
 		reply.Success = false
 		reply.Term = rf.currentTerm
+	// } else if args.Term == rf.currentTerm {
+
 	} else {
 		// his Term larger than me, so I'am follower
 		rf.state = FOLLOWER
@@ -250,12 +270,23 @@ func (rf *Raft) AppendEntries(args AppendEntryArgs, reply *AppendEntryReply) {
 		rf.votedFor = -1
 		reply.Term = args.Term
 		
-		// if args.PrevLogIndex >= 0 && len(rf.logs) - 1 < args.PrevLogIndex || args.PrevLogTerm != rf.logs[args.PrevLogIndex].Term {
-			// reply.Success = false
-		// } else {
+		if args.PrevLogIndex >= 0 && (len(rf.logs) - 1 < args.PrevLogIndex || args.PrevLogTerm != rf.logs[args.PrevLogIndex].Term) {
+			reply.Success = false
+		} else if args.Entries == nil { // the leader inform me that he is leader
+			rf.logs = rf.logs[ : args.PrevLogIndex + 1]
 			reply.Success = true
-		// }
+			reply.EntriesCount = 0
+		} else {
+			rf.logs = rf.logs[ : args.PrevLogIndex + 1]
+			rf.logs = append(rf.logs, args.Entries...)
+			reply.Success = true
+			reply.EntriesCount = len(args.Entries)
+		}
 		rf.persist()
+		if args.LeaderCommit > rf.commitIndex {
+			rf.commitIndex = int_min(args.LeaderCommit, len(rf.logs) - 1)
+			go rf.Commit()
+		}
 	}
 	rf.ResetTimer()
 }
@@ -264,28 +295,38 @@ func (rf *Raft) AppendEntries(args AppendEntryArgs, reply *AppendEntryReply) {
 // call by leader to send his enties to followers
 func (rf *Raft) SendAppendEntriesToAll() {
 	for peer := 0; peer < len(rf.peers); peer++ {
+		// if peer == rf.me || rf.nextIndex[peer] == len(rf.logs) {  // do not be like that, because heartbeat also through here
 		if peer == rf.me {
 			continue
 		}
 		var args AppendEntryArgs
 		args.Term = rf.currentTerm
 		args.LeaderId = rf.me
+
+		args.PrevLogIndex = rf.nextIndex[peer] - 1
+		if args.PrevLogIndex >= 0 {
+			args.PrevLogTerm = rf.logs[args.PrevLogIndex].Term
+		}
+		if rf.nextIndex[peer] < len(rf.logs) {
+			args.Entries = rf.logs[rf.nextIndex[peer] : ]
+		}
+		args.LeaderCommit = rf.commitIndex
 		go func(peer int, args AppendEntryArgs) {
 			var reply AppendEntryReply
 			ret := rf.peers[peer].Call("Raft.AppendEntries", args, &reply)
 			if ret {
-				rf.AfterSendAppendEntriesToAll(peer, reply)
+				rf.AfterSendAppendEntries(peer, reply)
 			}
 		}(peer, args);
 	}
 }
 
 // for leader to get the result of appending entries to followers
-func (rf *Raft) AfterSendAppendEntriesToAll(peer int, reply AppendEntryReply) {
+func (rf *Raft) AfterSendAppendEntries(peer int, reply AppendEntryReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	if rf.state != LEADER {
+	if rf.state != LEADER {   // when network is slow, this may happen
 		return
 	}
 	if reply.Term > rf.currentTerm {
@@ -298,11 +339,41 @@ func (rf *Raft) AfterSendAppendEntriesToAll(peer int, reply AppendEntryReply) {
 	}
 
 	if reply.Success == true {
+		rf.nextIndex[peer] += reply.EntriesCount
+		rf.matchIndex[peer] = rf.nextIndex[peer] - 1
+		cnt := 1
+		for peer_1 := 0; peer_1 < len(rf.peers); peer_1++ {
+			if peer_1 != rf.me && rf.matchIndex[peer_1] >= rf.matchIndex[peer] { 
+				// matchIndex is exist for leader to see a index whether already copy to other sever surpass majority 
+				cnt += 1
+			}
+		}
+		if cnt > len(rf.peers) / 2 {
+			if rf.commitIndex < rf.matchIndex[peer] &&
+			    rf.logs[rf.matchIndex[peer]].Term == rf.currentTerm {
+				rf.commitIndex = rf.matchIndex[peer]
+				go rf.Commit()
+			}
+		}
 
 	} else { //I'm leader
+		rf.nextIndex[peer] -= 1
 		rf.SendAppendEntriesToAll()
 	}
 
+}
+
+func (rf *Raft) Commit() {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	for i := rf.lastApplied + 1; i <= rf.commitIndex; i++ {
+		var args ApplyMsg
+		args.Index = i + 1
+		args.Command = rf.logs[i].Command
+		rf.applyCh <- args
+	}
+	rf.lastApplied = rf.commitIndex
 }
 
 func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
@@ -368,11 +439,10 @@ func (rf *Raft) getVoteResult(reply RequestVoteReply) {
 		rf.votesCount += 1
 		if rf.votesCount > len(rf.peers) / 2 {
 			rf.state = LEADER
-			// for peer := 0; peer < len(rf.peers); peer++ { 
-				// if peer == rf.me {
-					// continue
-				// }
-			// }
+			for peer := 0; peer < len(rf.peers); peer++ { 
+				rf.nextIndex[peer] = len(rf.logs) 	// initialized to leader last log index + 1
+				rf.matchIndex[peer] = -1 		  	// how many entries that sever has already
+			}
 			rf.SendAppendEntriesToAll()		// inform others immediately
 			rf.ResetTimer()					// and reset timer for next heartbeat
 		}
@@ -415,12 +485,26 @@ func (rf *Raft) sendRequestVote(server int, args RequestVoteArgs, reply *Request
 // term. the third return value is true if this server believes it is
 // the leader.
 //
+// use for the cilients communicating with leader to hand in a command
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	index := -1
 	term := -1
-	isLeader := true
+	isLeader := false
 
+	// Your code here, and you can change the code above
+	// if this server isn't the leader, returns false.
+	if rf.state != LEADER {
+		return index, term, isLeader 
+	}
 
+	var log LogEntry
+	log.Command = command
+	log.Term = rf.currentTerm
+	rf.logs = append(rf.logs, log)
+	index = len(rf.logs)
+	isLeader = true
+	term = rf.currentTerm
+	rf.persist()
 	return index, term, isLeader
 }
 
@@ -456,7 +540,14 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.currentTerm = 0
 	rf.votedFor = -1
 	rf.logs = make([]LogEntry, 0)
+	rf.persist()
 	rf.state = FOLLOWER
+	
+	rf.applyCh = applyCh
+	rf.commitIndex = -1
+	rf.lastApplied = -1
+	rf.nextIndex = make([]int, len(peers))		// automatically initialize to be 0
+	rf.matchIndex = make([]int, len(peers))  
 	rf.ResetTimer()			// for initing the first election
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
