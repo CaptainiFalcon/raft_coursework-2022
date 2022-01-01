@@ -27,7 +27,7 @@ import "math/rand"
 import "fmt"
 import "strconv"
 
-var debug bool = true
+var debug bool = false
 //
 // as each Raft peer becomes aware that successive log entries are
 // committed, the peer should send an ApplyMsg to the service (or
@@ -44,9 +44,9 @@ const (
 	CANDIDATE = 1
 	FOLLOWER = 2
 
-	HeartbeatTime = 50
-	ElectionMinTime = 170
-	ElectionMaxTime = 300
+	HeartbeatTime = 100
+	ElectionMinTime = 200
+	ElectionMaxTime = 400
 )
 
 type LogEntry struct {
@@ -209,9 +209,12 @@ func (rf *Raft) SendRequestVoteToAll(args RequestVoteArgs) {
 		}
 		go func(peer int, args RequestVoteArgs) {   // RPC, ask others to give me their vote
 			var reply RequestVoteReply				// store the result of RPC
-			ret := rf.peers[peer].Call("Raft.RequestVote", args, &reply)
-			if ret {	// if the remote procudure call successful, then go to analyse the result
-				rf.getVoteResult(reply)
+			for i := 1; i <= 3; i++ {
+				ret := rf.peers[peer].Call("Raft.RequestVote", args, &reply)
+				if ret {
+					rf.getVoteResult(reply)
+					break
+				}
 			}
 		}(peer, args)
 	}
@@ -357,9 +360,12 @@ func (rf *Raft) SendAppendEntriesToAll() {
 		}
 		go func(peer int, args AppendEntryArgs) {
 			var reply AppendEntryReply
-			ret := rf.peers[peer].Call("Raft.AppendEntries", args, &reply)
-			if ret {
-				rf.AfterSendAppendEntries(peer, reply)
+			for i := 1; i <= 3; i++ {
+				ret := rf.peers[peer].Call("Raft.AppendEntries", args, &reply)
+				if ret {
+					rf.AfterSendAppendEntries(peer, reply)
+					break
+				}
 			}
 		}(peer, args);
 	}
@@ -423,9 +429,9 @@ func (rf *Raft) Commit() {
 	for i := rf.lastApplied + 1; i <= rf.commitIndex; i++ {
 		var args ApplyMsg
 		args.Index = i + 1
-		if i == len(rf.logs) {
-			fmt.Printf("\nwhat the fuck " + strconv.Itoa(rf.commitIndex))
-		}
+		// if i == len(rf.logs) && debug {
+		// 	fmt.Printf("\nwhat's wrong  " + strconv.Itoa(rf.commitIndex))
+		// }
 		args.Command = rf.logs[i].Command
 		rf.applyCh <- args
 	}
