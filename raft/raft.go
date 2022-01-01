@@ -44,8 +44,8 @@ const (
 	CANDIDATE = 1
 	FOLLOWER = 2
 
-	HeartbeatTime = 100
-	ElectionMinTime = 150
+	HeartbeatTime = 50
+	ElectionMinTime = 170
 	ElectionMaxTime = 300
 )
 
@@ -131,7 +131,7 @@ func (rf *Raft) readPersist(data []byte) {
 	// d := gob.NewDecoder(r)
 	// d.Decode(&rf.xxx)
 	// d.Decode(&rf.yyy)
-	if nil != data {
+	if data != nil {
 		r := bytes.NewBuffer(data)
 		d := gob.NewDecoder(r)
 		d.Decode(&rf.currentTerm)
@@ -240,6 +240,9 @@ func (rf *Raft) TimeOut() {
 // when follower receive a "AppendEnties", he reset his timer for starting a election
 // leader reset his timer for heartbeat
 func (rf *Raft) ResetTimer() {
+	// rf.mu.Lock()
+	// defer rf.mu.Unlock()
+
 	CSMA_time := time.Duration(HeartbeatTime) * time.Millisecond   // it is similar with wireless communication
 	if rf.state != LEADER {
 		CSMA_time = time.Duration(ElectionMinTime + rand.Int63n(ElectionMaxTime - ElectionMinTime)) * time.Millisecond
@@ -294,12 +297,17 @@ func (rf *Raft) AppendEntries(args AppendEntryArgs, reply *AppendEntryReply) {
 			// fmt.Printf("\nsuccess to append to 2   " + strconv.Itoa(len(args.Entries)))
 		// }
 		// if args.LeaderCommit > rf.commitIndex {  // why stupiy
-		if reply.Success == true && args.LeaderCommit >= rf.commitIndex {
-			rf.commitIndex = int_min(args.LeaderCommit, len(rf.logs) - 1)
+		// if reply.Success == true && args.LeaderCommit >= rf.commitIndex {
+		// 	rf.commitIndex = int_min(args.LeaderCommit, len(rf.logs) - 1)
+		// 	go rf.Commit()
+		// }
+		if reply.Success == true && len(rf.logs) - 1 >= args.LeaderCommit {
+			rf.commitIndex = args.LeaderCommit
 			go rf.Commit()
 		}
+		rf.ResetTimer()
 	}
-	rf.ResetTimer()
+	// rf.ResetTimer()   // if he is not leader, you can not reset timer
 }
 
 // call by leader to inform followers that leader is alive
@@ -377,7 +385,8 @@ func (rf *Raft) AfterSendAppendEntries(peer int, reply AppendEntryReply) {
 		}
 
 	} else { //I'm leader
-		rf.nextIndex[peer] -= 1
+		// rf.nextIndex[peer] -= 1
+		rf.nextIndex[peer] = 0
 		rf.nextIndex[peer] = int_max(0, rf.nextIndex[peer])
 		rf.SendAppendEntriesToAll()
 	}
@@ -435,9 +444,12 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 			rf.votedFor = -1		// meet a larger Term but it's log is too old, so now vote for none
 		}
 		rf.persist()
-		rf.ResetTimer()			// because of changing state
+		// rf.ResetTimer()			// because of changing state
 		reply.Term = args.Term
 		reply.VoteGranted = (rf.votedFor == args.CandidateId)
+	}
+	if reply.VoteGranted == true {
+		rf.ResetTimer()
 	}
 	return
 }
@@ -465,7 +477,8 @@ func (rf *Raft) getVoteResult(reply RequestVoteReply) {
 			rf.state = LEADER
 			for peer := 0; peer < len(rf.peers); peer++ { 
 				rf.nextIndex[peer] = len(rf.logs) 	// initialized to leader last log index + 1
-				// rf.matchIndex[peer] = -1 		  	// how many corrent entries that sever has already， (initialized to 0, increases monotonically)
+				rf.matchIndex[peer] = -1 		  	// how many corrent entries that sever has already， (initialized to 0, increases monotonically)
+				// paper's index is start from 1, so it initialize to be 0, here, we should be -1
 			}
 			rf.SendAppendEntriesToAll()		// inform others immediately
 			rf.ResetTimer()					// and reset timer for next heartbeat
@@ -529,6 +542,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	isLeader = true
 	term = rf.currentTerm
 	rf.persist()
+	rf.SendAppendEntriesToAll()
 	return index, term, isLeader
 }
 
@@ -564,7 +578,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.currentTerm = 0
 	rf.votedFor = -1
 	rf.logs = make([]LogEntry, 0)
-	// rf.persist()		// how folish is you, not means you my dear teacher, I means me
+	// rf.persist()		// how folish is you
 	rf.state = FOLLOWER
 	
 	rf.applyCh = applyCh
