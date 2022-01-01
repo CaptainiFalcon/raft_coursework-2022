@@ -201,6 +201,21 @@ func int_min(a int, b int)(int) {
 	return b
 }
 
+func (rf *Raft) SendRequestVoteToAll(args RequestVoteArgs) {
+	for  peer:= 0; peer < len(rf.peers); peer++ {
+		if peer == rf.me {
+			continue
+		}
+		go func(peer int, args RequestVoteArgs) {   // RPC, ask others to give me their vote
+			var reply RequestVoteReply				// store the result of RPC
+			ret := rf.peers[peer].Call("Raft.RequestVote", args, &reply)
+			if ret {	// if the remote procudure call successful, then go to analyse the result
+				rf.getVoteResult(reply)
+			}
+		}(peer, args)
+	}
+}
+
 func (rf *Raft) TimeOut() {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
@@ -219,19 +234,7 @@ func (rf *Raft) TimeOut() {
 		if args.LastLogIndex >= 0 {
 			args.LastLogTerm = rf.logs[args.LastLogIndex].Term
 		}
-
-		for  peer:= 0; peer < len(rf.peers); peer++ {
-			if peer == rf.me {
-				continue
-			}
-			go func(peer int, args RequestVoteArgs) {   // RPC, ask others to give me their vote
-				var reply RequestVoteReply				// store the result of RPC
-				ret := rf.peers[peer].Call("Raft.RequestVote", args, &reply)
-				if ret {	// if the remote procudure call successful, then go to analyse the result
-					rf.getVoteResult(reply)
-				}
-			}(peer, args)
-		}
+		rf.SendRequestVoteToAll(args);
 	}
 	// leader and follower both need to reset tiemr
 	rf.ResetTimer()
@@ -269,7 +272,7 @@ func (rf *Raft) AppendEntries(args AppendEntryArgs, reply *AppendEntryReply) {
 		reply.Success = false
 		reply.Term = rf.currentTerm
 	// } else if args.Term == rf.currentTerm {
-
+		// fmt.Printf("\nargs.Term == rf.currentTerm in appendentries  " + strconv.Itoa(len(args.Entries)))
 	} else {
 		// his Term larger than me, so I'am follower
 		rf.state = FOLLOWER
@@ -277,10 +280,17 @@ func (rf *Raft) AppendEntries(args AppendEntryArgs, reply *AppendEntryReply) {
 		rf.votedFor = -1
 		reply.Term = args.Term
 		
-		if args.PrevLogIndex >= 0 && (len(rf.logs) - 1 < args.PrevLogIndex || args.PrevLogTerm != rf.logs[args.PrevLogIndex].Term) {
+		// if args.PrevLogIndex >= 0 && (len(rf.logs) - 1 < args.PrevLogIndex || args.PrevLogTerm != rf.logs[args.PrevLogIndex].Term) {
+		if args.PrevLogIndex >= 0 && (len(rf.logs) - 1 < args.PrevLogIndex) {
 			reply.Success = false
 			reply.EntriesCount = 0
-		} else if args.Entries == nil { // the leader inform me that he is leader
+		} else if args.PrevLogIndex >= 0 && (args.PrevLogIndex < len(rf.logs)) && args.PrevLogTerm != rf.logs[args.PrevLogIndex].Term {  
+		//If an existing entry conflicts with a new one (same index	but different terms), delete the existing entry and all that follow it (§5.3)
+			rf.logs = rf.logs[ : args.PrevLogTerm]
+			reply.Success = false
+			fmt.Printf("\ndelete me and the after   " + strconv.Itoa(args.PrevLogIndex))
+
+		} else if args.Entries == nil { // the leader inform me that he is leader or heartbeat
 			// if args.PrevLogIndex + 1 >= 0 {
 			rf.logs = rf.logs[ : args.PrevLogIndex + 1]
 			// }
@@ -385,8 +395,8 @@ func (rf *Raft) AfterSendAppendEntries(peer int, reply AppendEntryReply) {
 		}
 
 	} else { //I'm leader
-		// rf.nextIndex[peer] -= 1
-		rf.nextIndex[peer] = 0
+		rf.nextIndex[peer] -= 1
+		// rf.nextIndex[peer] = 0
 		rf.nextIndex[peer] = int_max(0, rf.nextIndex[peer])
 		rf.SendAppendEntriesToAll()
 	}
@@ -431,9 +441,10 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 		// If votedFor is null or candidateId, and candidate’s log is at least as up-to-date as receiver’s log, grant vote
 		if (rf.votedFor == -1 || rf.votedFor == args.CandidateId) && candidate_log_MUTD {
 			rf.votedFor = args.CandidateId		// is persistent data
-			rf.persist()
 			reply.Term = args.Term
 			reply.VoteGranted = true
+			rf.state = FOLLOWER
+			rf.persist()
 		}
 	} else {
 		rf.currentTerm = args.Term  // if one server’s current term is smaller than the other’s, then it updates its current term to the larger value.
@@ -503,10 +514,10 @@ func (rf *Raft) getVoteResult(reply RequestVoteReply) {
 // that the caller passes the address of the reply struct with &, not
 // the struct itself.
 //
-func (rf *Raft) sendRequestVote(server int, args RequestVoteArgs, reply *RequestVoteReply) bool {
-	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
-	return ok
-}
+// func (rf *Raft) sendRequestVote(server int, args RequestVoteArgs, reply *RequestVoteReply) bool {
+// 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
+// 	return ok
+// }
 
 
 //
