@@ -182,6 +182,7 @@ type AppendEntryReply struct {
 	Term 			int
 	Success 		bool
 	EntriesCount	int			// how many entries leader sent to me
+	MatchIndex		int
 }
 
 //
@@ -280,34 +281,45 @@ func (rf *Raft) AppendEntries(args AppendEntryArgs, reply *AppendEntryReply) {
 		rf.votedFor = -1
 		reply.Term = args.Term
 		
-		// if args.PrevLogIndex >= 0 && (len(rf.logs) - 1 < args.PrevLogIndex || args.PrevLogTerm != rf.logs[args.PrevLogIndex].Term) {
-		if args.PrevLogIndex >= 0 && (len(rf.logs) - 1 < args.PrevLogIndex) {
-			reply.Success = false
-			reply.EntriesCount = 0
-		} else if args.PrevLogIndex >= 0 && (args.PrevLogIndex < len(rf.logs)) && args.PrevLogTerm != rf.logs[args.PrevLogIndex].Term {  
-		//If an existing entry conflicts with a new one (same index	but different terms), delete the existing entry and all that follow it (§5.3)
-			rf.logs = rf.logs[ : args.PrevLogTerm]
-			reply.Success = false
-			fmt.Printf("\ndelete me and the after   " + strconv.Itoa(args.PrevLogIndex))
+		// if args.PrevLogIndex >= 0 && (len(rf.logs) - 1 < args.PrevLogIndex) {
+		// 	reply.Success = false
+		// 	reply.EntriesCount = 0
+		// } else if args.PrevLogIndex >= 0 && (args.PrevLogIndex < len(rf.logs)) && args.PrevLogTerm != rf.logs[args.PrevLogIndex].Term {  
+		// //If an existing entry conflicts with a new one (same index	but different terms), delete the existing entry and all that follow it (§5.3)
+		// 	rf.logs = rf.logs[ : args.PrevLogTerm]
+		// 	reply.Success = false
+		// 	fmt.Printf("\ndelete me and the after   " + strconv.Itoa(args.PrevLogIndex))
+		if args.PrevLogIndex >= 0 && (len(rf.logs) - 1 < args.PrevLogIndex || args.PrevLogTerm != rf.logs[args.PrevLogIndex].Term) {
+			index := len(rf.logs)-1
+			if index>args.PrevLogIndex{
+				index = args.PrevLogIndex
+			}
 
+			for index >=0 {
+				if(args.PrevLogTerm == rf.logs[index].Term){
+				 break
+			  }
+				index --
+			}
+			reply.MatchIndex = index
+			reply.Success = false
 		} else if args.Entries == nil { // the leader inform me that he is leader or heartbeat
 			// if args.PrevLogIndex + 1 >= 0 {
 			rf.logs = rf.logs[ : args.PrevLogIndex + 1]
 			// }
 			reply.Success = true
 			reply.EntriesCount = 0
+			reply.MatchIndex = args.PrevLogIndex
 		} else {
 			rf.logs = rf.logs[ : args.PrevLogIndex + 1]
 			rf.logs = append(rf.logs, args.Entries...)
 			reply.Success = true
 			reply.EntriesCount = len(args.Entries)
+			reply.MatchIndex = len(rf.logs) - 1
 		}
 		rf.persist()
-		// if rf.me == 2 && reply.Success == true {
-			// fmt.Printf("\nsuccess to append to 2   " + strconv.Itoa(len(args.Entries)))
-		// }
 		// if args.LeaderCommit > rf.commitIndex {  // why stupiy
-		// if reply.Success == true && args.LeaderCommit >= rf.commitIndex {
+		// if reply.Success == true && args.LeaderCommit > rf.commitIndex {
 		// 	rf.commitIndex = int_min(args.LeaderCommit, len(rf.logs) - 1)
 		// 	go rf.Commit()
 		// }
@@ -371,8 +383,11 @@ func (rf *Raft) AfterSendAppendEntries(peer int, reply AppendEntryReply) {
 	}
 
 	if reply.Success == true {
-		rf.nextIndex[peer] += reply.EntriesCount
-		rf.matchIndex[peer] = int_max(rf.nextIndex[peer] - 1, rf.matchIndex[peer])
+		// rf.nextIndex[peer] += reply.EntriesCount
+		// rf.matchIndex[peer] = int_max(rf.nextIndex[peer] - 1, rf.matchIndex[peer])
+		// rf.nextIndex[peer] = 0
+		rf.nextIndex[peer] = reply.MatchIndex + 1
+		rf.matchIndex[peer] = reply.MatchIndex
 		/* If there exists an N such that N > commitIndex, a majority
 			of matchIndex[i] ≥ N, and log[N].term == currentTerm:
 			set commitIndex = N (§5.3, §5.4).
@@ -395,9 +410,7 @@ func (rf *Raft) AfterSendAppendEntries(peer int, reply AppendEntryReply) {
 		}
 
 	} else { //I'm leader
-		rf.nextIndex[peer] -= 1
-		// rf.nextIndex[peer] = 0
-		rf.nextIndex[peer] = int_max(0, rf.nextIndex[peer])
+		rf.nextIndex[peer] = reply.MatchIndex + 1
 		rf.SendAppendEntriesToAll()
 	}
 
