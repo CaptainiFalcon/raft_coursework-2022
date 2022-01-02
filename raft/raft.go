@@ -24,8 +24,8 @@ import "bytes"
 import "encoding/gob"
 import "time"
 import "math/rand"
-import "fmt"
-import "strconv"
+// import "fmt"
+// import "strconv"
 
 var debug bool = false
 //
@@ -181,7 +181,7 @@ type AppendEntryArgs struct {
 type AppendEntryReply struct {
 	Term 			int
 	Success 		bool
-	EntriesCount	int			// how many entries leader sent to me
+	// EntriesCount	int			// how many entries leader sent to me
 	MatchIndex		int
 }
 
@@ -293,31 +293,36 @@ func (rf *Raft) AppendEntries(args AppendEntryArgs, reply *AppendEntryReply) {
 		// 	reply.Success = false
 		// 	fmt.Printf("\ndelete me and the after   " + strconv.Itoa(args.PrevLogIndex))
 		if args.PrevLogIndex >= 0 && (len(rf.logs) - 1 < args.PrevLogIndex || args.PrevLogTerm != rf.logs[args.PrevLogIndex].Term) {
-			index := len(rf.logs)-1
-			if index>args.PrevLogIndex{
+			index := len(rf.logs) - 1
+			if index > args.PrevLogIndex{
 				index = args.PrevLogIndex
 			}
-
-			for index >=0 {
+			flag := false
+			for index >= 0 {
 				if(args.PrevLogTerm == rf.logs[index].Term){
-				 break
+					flag = true
+					break
 			  }
 				index --
 			}
 			reply.MatchIndex = index
+			if flag == false {
+				reply.MatchIndex = args.PrevLogIndex - 10
+				reply.MatchIndex = int_max(-1, reply.MatchIndex)
+			}
 			reply.Success = false
 		} else if args.Entries == nil { // the leader inform me that he is leader or heartbeat
 			// if args.PrevLogIndex + 1 >= 0 {
 			rf.logs = rf.logs[ : args.PrevLogIndex + 1]
 			// }
 			reply.Success = true
-			reply.EntriesCount = 0
+			// reply.EntriesCount = 0
 			reply.MatchIndex = args.PrevLogIndex
 		} else {
 			rf.logs = rf.logs[ : args.PrevLogIndex + 1]
 			rf.logs = append(rf.logs, args.Entries...)
 			reply.Success = true
-			reply.EntriesCount = len(args.Entries)
+			// reply.EntriesCount = len(args.Entries)
 			reply.MatchIndex = len(rf.logs) - 1
 		}
 		rf.persist()
@@ -563,11 +568,13 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	if rf.state != LEADER {
 		return index, term, isLeader 
 	}
-
+	
 	var log LogEntry
 	log.Command = command
 	log.Term = rf.currentTerm
+	rf.mu.Lock()
 	rf.logs = append(rf.logs, log)
+	rf.mu.Unlock()
 	index = len(rf.logs)
 	isLeader = true
 	term = rf.currentTerm
