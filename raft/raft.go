@@ -568,13 +568,12 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	if rf.state != LEADER {
 		return index, term, isLeader 
 	}
-	
 	var log LogEntry
 	log.Command = command
 	log.Term = rf.currentTerm
-	rf.mu.Lock()
+	// rf.mu.Lock()
 	rf.logs = append(rf.logs, log)
-	rf.mu.Unlock()
+	// rf.mu.Unlock()
 	index = len(rf.logs)
 	isLeader = true
 	term = rf.currentTerm
